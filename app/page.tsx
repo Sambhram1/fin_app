@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { User } from '@supabase/supabase-js';
 import LoginPage from '@/components/LoginPage';
@@ -21,7 +21,29 @@ export default function Home() {
   const [streak, setStreak] = useState(0);
   const [badges, setBadges] = useState<string[]>([]);
 
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
+
+  const loadUserProfile = useCallback(async (userId: string) => {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .single();
+
+    if (profile) {
+      setUserName(profile.username);
+      setUserPoints(profile.xp);
+      setUserLevel(profile.level);
+      setStreak(profile.streak);
+
+      // Calculate badges based on achievements
+      const userBadges: string[] = [];
+      if (profile.xp >= 100) userBadges.push('First Save');
+      if (profile.level >= 3) userBadges.push('Quiz Master');
+      if (profile.level >= 5) userBadges.push('Budget Pro');
+      setBadges(userBadges);
+    }
+  }, [supabase]);
 
   useEffect(() => {
     // Check active session
@@ -52,29 +74,7 @@ export default function Home() {
     });
 
     return () => subscription.unsubscribe();
-  }, []);
-
-  const loadUserProfile = async (userId: string) => {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', userId)
-      .single();
-
-    if (profile) {
-      setUserName(profile.username);
-      setUserPoints(profile.xp);
-      setUserLevel(profile.level);
-      setStreak(profile.streak);
-      
-      // Calculate badges based on achievements
-      const userBadges = [];
-      if (profile.xp >= 100) userBadges.push('First Save');
-      if (profile.level >= 3) userBadges.push('Quiz Master');
-      if (profile.level >= 5) userBadges.push('Budget Pro');
-      setBadges(userBadges);
-    }
-  };
+  }, [loadUserProfile, supabase]);
 
   const handleLogin = async (username: string) => {
     setUserName(username);

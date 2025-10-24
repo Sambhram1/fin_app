@@ -217,7 +217,7 @@ export default function Dashboard({ userLevel, userPoints, streak, badges, setAc
               </div>
             ))}
             <p className="text-[10px] text-gray-400 mt-4" style={{ fontFamily: 'var(--font-pixel)' }}>
-              💎 Save 20% of income to unlock "Diamond Saver" badge!
+              💎 Save 20% of income to unlock &quot;Diamond Saver&quot; badge!
             </p>
           </div>
         </div>
