@@ -1,122 +1,121 @@
-import { NextRequest, NextResponse } from 'next/server';
-import Groq from 'groq-sdk';
+import { NextRequest, NextResponse } from "next/server";
+import Groq from "groq-sdk";
+import WebSocket from "ws"; // 👈 used for MCP connection
 
 const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
+  apiKey: process.env.GROQ_API_KEY!,
 });
+
+// Utility: Connect to MCP and fetch data dynamically
+async function fetchFromMCP(tool: string, payload: Record<string, any>) {
+  return new Promise((resolve, reject) => {
+    const A2A_WS = process.env.MCP_A2A_WS || "ws://localhost:8765";
+    const ws = new WebSocket(A2A_WS);
+
+    const timeout = setTimeout(() => {
+      try {
+        ws.close();
+      } catch {}
+      reject(new Error("Timeout waiting for MCP response"));
+    }, 15000);
+
+    ws.on("open", () => {
+      const message = JSON.stringify({ action: tool, ...payload });
+      ws.send(message);
+    });
+
+    ws.on("message", (data) => {
+      try {
+        clearTimeout(timeout);
+        const response = JSON.parse(data.toString());
+        ws.close();
+        resolve(response);
+      } catch (err) {
+        clearTimeout(timeout);
+        ws.close();
+        reject(err);
+      }
+    });
+
+    ws.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
 
 export async function POST(request: NextRequest) {
   try {
     const { message, conversationHistory } = await request.json();
 
-    if (!message || typeof message !== 'string') {
-      return NextResponse.json(
-        { error: 'Message is required' },
-        { status: 400 }
-      );
+    if (!message || typeof message !== "string") {
+      return NextResponse.json({ error: "Message is required" }, { status: 400 });
     }
 
-    // System prompt for financial education
-    const systemPrompt = `You are FinBuddy's AI Mentor - a friendly, knowledgeable financial advisor with a fun Minecraft/gaming theme. Your personality traits:
+    // 🧠 System prompt for FinBuddy
+    const systemPrompt = `You are FinBuddy's AI Mentor - a friendly, knowledgeable financial advisor with a fun Minecraft/gaming theme.
 
-🎮 PERSONALITY:
-- Speak like a helpful NPC guide in a video game
-- Use gaming metaphors (diamonds = savings, XP = financial growth, quests = goals, etc.)
-- Be encouraging and supportive, celebrating small wins
-- Keep responses concise (2-3 sentences max unless explaining complex topics)
-- Use emojis sparingly but appropriately (⚔️💎📈🛡️🏆)
+If the user asks anything that needs real financial data (like "my budget", "returns", "portfolio", "simulate future"), 
+call the correct MCP tool by returning a JSON like:
+{
+  "tool_call": "context_request",
+  "params": { "context_type": "portfolio" }
+}
 
-💡 EXPERTISE:
-You provide expert advice on:
-- Budgeting (especially 50-30-20 rule)
-- Saving strategies and emergency funds
-- Investing basics (stocks, index funds, ETFs)
-- Debt management
-- Credit scores and credit cards
-- Financial goal setting
-- Compound interest and retirement planning
+Otherwise, respond normally in 2-3 lines.`;
 
-🎯 RESPONSE STYLE:
-- Start with an emoji that matches the topic
-- Use gaming analogies naturally (e.g., "Building an emergency fund is like having extra lives")
-- Give actionable, practical advice
-- Avoid overly technical jargon
-- If asked about topics outside finance, gently redirect to financial topics
-- For complex questions, break down into simple steps
-
-⚠️ SAFETY:
-- Never give specific investment recommendations (e.g., "buy XYZ stock")
-- Always remind users this is educational advice, not professional financial planning
-- Encourage users to consult licensed financial advisors for major decisions
-- Don't make promises about returns or guarantees
-
-📚 EDUCATIONAL FOCUS:
-Help users understand WHY financial concepts matter, not just WHAT to do. Connect financial literacy to their real-life goals and gaming achievements.`;
-
-    // Build conversation history for context
+    // 🧩 Build chat context
     const messages: any[] = [
-      {
-        role: 'system',
-        content: systemPrompt,
-      },
+      { role: "system", content: systemPrompt },
+      ...(conversationHistory || []).map((msg: any) => ({
+        role: msg.sender === "user" ? "user" : "assistant",
+        content: msg.text,
+      })),
+      { role: "user", content: message },
     ];
 
-    // Add conversation history if provided
-    if (conversationHistory && Array.isArray(conversationHistory)) {
-      conversationHistory.forEach((msg: any) => {
-        messages.push({
-          role: msg.sender === 'user' ? 'user' : 'assistant',
-          content: msg.text,
-        });
-      });
-    }
-
-    // Add current user message
-    messages.push({
-      role: 'user',
-      content: message,
-    });
-
-    // Call Groq API
-    const completion = await groq.chat.completions.create({
+    // 🧠 Step 1: Ask Groq to interpret intent
+    const initialResponse = await groq.chat.completions.create({
       messages,
-      model: 'llama-3.3-70b-versatile', // Fast and capable model
-      temperature: 0.7, // Balanced creativity
-      max_tokens: 300, // Keep responses concise
-      top_p: 0.9,
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.7,
+      max_tokens: 300,
     });
 
-    const botResponse = completion.choices[0]?.message?.content || 
-      "🤔 Hmm, I didn't quite catch that, adventurer! Could you rephrase your question?";
+    let botMessage = initialResponse.choices[0]?.message?.content || "";
 
-    return NextResponse.json({ 
-      response: botResponse,
-      success: true 
+    // 🧠 Step 2: Check if Groq wants to call MCP
+    let mcpResponse: any = null;
+    try {
+      const parsed = JSON.parse(botMessage);
+      if (parsed?.tool_call) {
+        mcpResponse = await fetchFromMCP(parsed.tool_call, parsed.params);
+        console.log("📊 MCP Data:", mcpResponse);
+
+        // Step 3: Ask Groq to summarize data in user-friendly style
+        const summarized = await groq.chat.completions.create({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            { role: "system", content: "Summarize this portfolio data in a fun, educational, gaming style." },
+            { role: "user", content: JSON.stringify(mcpResponse) },
+          ],
+        });
+
+        botMessage = summarized.choices[0]?.message?.content || "📈 Got your data, but I couldn’t summarize it!";
+      }
+    } catch {
+      // Not JSON → regular chat
+    }
+
+    return NextResponse.json({
+      response: botMessage,
+      success: true,
+      mcpResponse,
     });
-
   } catch (error: any) {
-    console.error('Groq API error:', error);
-    
-    // Handle specific error cases
-    if (error?.status === 401) {
-      return NextResponse.json(
-        { error: 'Invalid API key. Please check your Groq configuration.' },
-        { status: 401 }
-      );
-    }
-
-    if (error?.status === 429) {
-      return NextResponse.json(
-        { error: 'Rate limit exceeded. Please try again in a moment.' },
-        { status: 429 }
-      );
-    }
-
+    console.error("Groq + MCP error:", error);
     return NextResponse.json(
-      { 
-        error: 'Failed to get AI response. Please try again.',
-        details: error.message 
-      },
+      { error: "Failed to get response", details: error.message },
       { status: 500 }
     );
   }
